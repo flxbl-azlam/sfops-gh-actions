@@ -1,0 +1,190 @@
+name: IssueOps - Deploy a release to an org
+
+
+on:
+  workflow_call:
+    inputs:
+      issue-title: 
+        description: "The title of the issue"
+        type: "string"
+      issue-body: 
+         description: "The body of the issue"
+         type: "string"
+      issue-number:
+         description: "The number of the issue"
+         type: "string"
+      dashboard-repo:
+        description: "Target repo to submit package version report as HTML"
+        type: "string"
+      metrics-provider:
+        description: "The metrics provider to be used"
+        type: "string"
+      sfopsbot-app-id: 
+         description: The App id of the bot used for this workflow_call
+         type: "string"
+      additional-plugins:
+         description: Additional plugins used while deploying packages
+         type: "string"
+    secrets:
+      NPM_TOKEN:
+        description: "GH TOKEN to publish to NPM"
+      DEVHUB_SFDX_AUTH_URL:
+        description: "Devhub Auth URL"
+      SB_SFDX_AUTH_URL:
+        description: "Sandbox Auth URL"
+      DATADOG_API_KEY:
+        description: "Datadog api key to report metrics"
+      DATADOG_HOST:
+        description: "Datadog host to report metrics"
+      SFOPSBOT_APP_PRIVATE_KEY:
+        description: "Private key of the bot app used"  
+  
+  
+
+ 
+
+jobs:
+  issue_analyzer:
+      runs-on: ubuntu-latest
+      outputs:
+        sfops_issue: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue }}
+        sfops_issue_envs: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue_envs }}
+        sfops_issue_releasedefn: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue_releasedefn }}
+        sfops_issue_envprofile: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue_envprofile }}
+        sfops_issue_forceInstall: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue_forceInstall }}
+        sfops_issue_overridePackageVersions: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue_overridePackageVersions }}
+        sfops_issue_excludePackages: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue_excludePackages }}
+      steps:
+
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ inputs.sfopsbot-app-id }}
+          private-key: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+  
+      - name: Analyze Issue
+        uses: flxbl-azlam/sfops-gh-actions/issueAnalyzer@main
+        id: sfops_issue_analyzer
+        with:
+          issue: ${{ github.event.issue.number }}
+          token: ${{ steps.app-token.outputs.token }}
+          repo_owner: ${{ github.repository_owner }}
+          repo_name: ${{ github.event.repository.name }}
+          include_issues: 'request-a-release'
+
+      - name: Create Comment on Issue
+        uses: flxbl-azlam/sfops-gh-actions/add-pr-comment@main
+        if: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue == 'true' && github.event.action == 'opened' }}
+        with:
+          issue: ${{ github.event.issue.number }}
+          repo-token: ${{ steps.app-token.outputs.token }}
+          message: |      
+            Hello @${{ github.event.issue.user.login }} :wave:
+            
+            Thanks for requesting a release to environment(s) __${{ steps.sfops_issue_analyzer.outputs.sfops_issue_envs }}__
+            We will start the process of deploying the release  contained in the release definition   __${{ steps.sfops_issue_analyzer.outputs.sfops_issue_releasedefn }}__
+            
+            You will be notified when the release is complete
+            Please check the logs at https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}
+
+       # gh needs checking out
+      - name: Checkout Repository
+        if: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue == 'false'}}
+        uses: actions/checkout@v4
+
+
+      - name: Cancel deployment if no changes
+        id: cancel-if-necessary
+        if: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue == 'false'}}
+        run: |
+            echo "Not an sfops issue or its excluded,  Cancelling workflow run."
+            gh auth status
+            gh run cancel ${{ github.run_id }}
+        env:
+            GH_TOKEN: ${{ steps.app-token.outputs.token }}
+  
+  execute_action:
+    name: 'Execute Release to any env'
+    needs: issue_analyzer
+    if: needs.issue_analyzer.outputs.sfops_issue == 'true'
+    uses:  flxbl-azlam/sfops-gh-actions/.github/workflows/release-to-an-env.yml@main
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: ${{  fromJSON(needs.issue_analyzer.outputs.sfops_issue_envs) }}
+    with:
+        org-name:  ${{ matrix.environment }}
+        releaseDefn:  ${{ needs.issue_analyzer.outputs.sfops_issue_releasedefn }}
+        environment-profile: ${{ needs.issue_analyzer.outputs.sfops_issue_envprofile }}
+        branchname: releasedefns
+        overrideSkipIfAlreadyInstalled: ${{ needs.issue_analyzer.outputs.sfops_issue_forceInstall}}
+        overridePackageVersions: ${{ needs.issue_analyzer.outputs.sfops_issue_overridePackageVersions }}
+        excludePackages: ${{ needs.issue_analyzer.outputs.sfops_issue_excludePackages }}
+        issue-number: ${{ github.event.issue.number }}
+        releaselogbranch: releaselogs
+        issue-author: ${{github.event.issue.user.login}}
+        issue-notifier: ${{ inputs.issue-notifier }}
+        workitem-url: ${{ inputs.workitem-url }}
+        metrics-provider: 'datadog'
+        sfopsbot-app-id: ${{ inputs.sfopsbot-app-id }}
+        additional-plugins: ${{ inputs.additional-plugins }}
+    secrets:
+        NPM_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        DEVHUB_SFDX_AUTH_URL: ${{ secrets.DEVHUB_SFDX_AUTH_URL }}
+        SFOPSBOT_APP_PRIVATE_KEY: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+      
+  close_issue:
+     runs-on: ubuntu-latest
+     needs: execute_action
+     steps:
+
+      # gh needs a repo bummer
+      - uses: actions/checkout@v4
+
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+         app-id: ${{ inputs.sfopsbot-app-id }}
+         private-key: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+         owner: ${{ github.repository_owner }}
+
+
+      - name: Close Issue
+        run: |
+           gh issue close ${{ github.event.issue.number }} -c " Hello @${{ github.event.issue.user.login }} :wave: Your request has been sucessfully processed" -r "Completed"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+
+  comment_issue_on_error:
+      runs-on: ubuntu-latest
+      needs:   execute_action
+      if: always() && needs.execute_action.result == 'failure'
+      steps:
+
+
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ inputs.sfopsbot-app-id}}
+          private-key: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+
+      - name: Create Comment after failure
+        uses: flxbl-azlam/sfops-gh-actions/add-pr-comment@main
+        with:
+          issue: ${{ github.event.issue.number }}
+          repo-token: ${{ steps.app-token.outputs.token }}
+          message: |      
+            ## ⚠️ Something went wrong !!! ⚠️
+
+            Hello @${{ github.event.issue.user.login }} :wave: ,
+
+            Looks like the **sfops 🤖**   has failed to process your request successfully.  Can you have a look please?
+            
+            This would need your manual attention please check the job run
+            at the link https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}
+
+            [1]: This comment is auto generated by [sfops 🤖]
+
+          

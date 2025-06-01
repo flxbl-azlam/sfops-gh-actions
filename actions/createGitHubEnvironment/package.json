@@ -1,0 +1,30 @@
+{
+    "name": "create-github-environment",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Create GitHub Deployment Environment in a repo",
+    "main": "index.js",
+    "scripts": {
+      "build": "ncc build",
+      "test": "jest"
+    },
+    "repository": {
+      "type": "git"
+    },
+    "keywords": [
+      "actions",
+      "github",
+      "labels"
+    ],
+    "author": "Flxbl",
+    "dependencies": {
+      "@actions/core": "^1.10.1",
+      "@actions/github": "6.0.0"
+    },
+    "devDependencies": {
+      "jest": "^27.4.7",
+      "@types/jest": "^29.5.12",
+      "@types/node": "^20.12.13",
+      "@vercel/ncc": "0.38.1"
+    }
+  }

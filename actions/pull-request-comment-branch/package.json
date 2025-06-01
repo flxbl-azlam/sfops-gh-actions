@@ -1,0 +1,29 @@
+{
+  "name": "pull-request-comment-branch",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Gets the head ref and sha of a pull request comment",
+  "main": "dist/index.js",
+  "scripts": {
+    "compile": "tsc",
+    "clean": "rimraf dist lib",
+    "package": "ncc build ./src/main.ts --source-map --license license.txt",
+    "prerelease": "npm run clean",
+    "build": "npm run package",
+    "test": "tsc --noEmit"
+  },
+  "keywords": [
+    "actions"
+  ],
+  "author": "flxbl-io",
+  "dependencies": {
+    "@actions/core": "^1.10.1",
+    "@actions/github": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.20",
+    "@vercel/ncc": "^0.38.1",
+    "rimraf": "^5.0.5",
+    "typescript": "^5.3.3"
+  }
+}

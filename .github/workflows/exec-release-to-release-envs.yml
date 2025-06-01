@@ -1,0 +1,304 @@
+name: IssueOps - Release a Domain To Release Envs
+
+
+on:
+  workflow_call:
+    inputs:
+      issue-title: 
+        description: "The title of the issue"
+        type: "string"
+      issue-body: 
+         description: "The body of the issue"
+         type: "string"
+      issue-number:
+         description: "The number of the issue"
+         type: "string"
+      source-repo-url: 
+         description: The source repo-url
+         type: "string"
+      workitem-url: 
+         description: The work item tracker url
+         type: "string"
+      dashboard-repo:
+        description: "Target repo to submit package version report as HTML"
+        type: "string"
+      issue-notifier: 
+         description: The repo to be notified about the issue
+         type: "string"   
+      metrics-provider:
+        description: "The metrics provider to be used"
+        type: "string"      
+      sfopsbot-app-id: 
+         description: The App id of the bot used for this workflow_call
+         type: "string"
+      additional-plugins:
+         description: Additional plugins used while deploying packages
+         type: "string"
+    secrets:
+      NPM_TOKEN:
+        description: "GH TOKEN to publish to NPM"
+      DEVHUB_SFDX_AUTH_URL:
+        description: "Devhub Auth URL"
+      SB_SFDX_AUTH_URL:
+        description: "Sandbox Auth URL"
+      DATADOG_API_KEY:
+        description: "Datadog api key to report metrics"
+      DATADOG_HOST:
+        description: "Datadog host to report metrics"
+      SFOPSBOT_APP_PRIVATE_KEY:
+        description: "Private key of the bot app used"  
+      STAGING_SFDX_AUTH_URL:
+        description: "Staging Sandbox Auth URL..workaround for now"
+      PREPROD_SFDX_AUTH_URL:
+        description: "Preprod Sandbox Auth URL..workaround for now"
+      UAT_SFDX_AUTH_URL:
+        description: "Uat Sandbox Auth URL..workaround for now"
+      QA_SFDX_AUTH_URL:
+        description: "Uat Sandbox Auth URL..workaround for now"
+      IQA_SFDX_AUTH_URL:
+        description: "Uat Sandbox Auth URL..workaround for now"
+      SIT_SFDX_AUTH_URL:
+        description: "Uat Sandbox Auth URL..workaround for now"
+  
+  
+  
+
+jobs:
+
+  issue_analyzer:
+      runs-on: ubuntu-latest
+      outputs:
+        sfops_issue: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue }}
+        sfops_issue_envs: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue_envs }}
+        sfops_issue_domain: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue_domain }}
+        sfops_issue_releasedefn: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue_releasedefn }}
+        sfops_issue_forceInstall: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue_forceInstall }}
+        sfops_issue_overridePackageVersions: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue_overridePackageVersions }}
+        sfops_issue_excludePackages: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue_excludePackages }}
+      steps:
+
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ inputs.sfopsbot-app-id }}
+          private-key: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+  
+      - name: Analyze Issue
+        uses: flxbl-azlam/sfops-gh-actions/issueAnalyzer@main
+        id: sfops_issue_analyzer
+        with:
+          issue: ${{ github.event.issue.number }}
+          token: ${{ steps.app-token.outputs.token }}
+          repo_owner: ${{ github.repository_owner }}
+          repo_name: ${{ github.event.repository.name }}
+          include_issues: 'request-a-release-release-envs'
+
+      - name: Create Comment on Issue
+        uses: flxbl-azlam/sfops-gh-actions/add-pr-comment@main
+        if: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue == 'true' && github.event.action == 'opened' }}
+        with:
+          issue: ${{ github.event.issue.number }}
+          repo-token: ${{ steps.app-token.outputs.token }}
+          message: |      
+            Hello @${{ github.event.issue.user.login }} :wave:
+            
+            Thanks for requesting a release to release environment(s) 
+            We will start the process of deploying the release  contained in the release definition   __${{ steps.sfops_issue_analyzer.outputs.sfops_issue_releasedefn }}__
+            
+            You will be notified when the release is complete
+            Please check the logs at https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}
+
+       # gh needs checking out
+      - name: Checkout Repository
+        if: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue == 'false'}}
+        uses: actions/checkout@v4
+
+
+      - name: Cancel deployment if no changes
+        id: cancel-if-necessary
+        if: ${{ steps.sfops_issue_analyzer.outputs.sfops_issue == 'false'}}
+        run: |
+            echo "Not an sfops issue or its excluded,  Cancelling workflow run."
+            gh auth status
+            gh run cancel ${{ github.run_id }}
+        env:
+            GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  fetch-release-envs:
+    needs:  issue_analyzer
+    runs-on: ubuntu-latest
+    name: Fetch all release envs
+    outputs:
+      allEnvsAsJSON: ${{ steps.fetchAllEnvs.outputs.allEnvsAsJSON }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+         app-id: ${{ inputs.sfopsbot-app-id }}
+         private-key: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+         owner: ${{ github.repository_owner }}
+
+      - uses: flxbl-azlam/sfops-gh-actions/fetchAllEnvs@main
+        id: fetchAllEnvs
+        with:
+          gh_token: ${{ steps.app-token.outputs.token }}
+          filter: "type:release"
+
+  pre_release_check:
+    needs: 
+      - fetch-release-envs
+      - issue_analyzer
+    uses:  flxbl-azlam/sfops-gh-actions/.github/workflows/pre-release-check.yml@main
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: ${{  fromJSON(needs.fetch-release-envs.outputs.allEnvsAsJSON) }}
+    with:
+        sbxname:  ${{ matrix.environment }}
+        releaseDefn:  ${{ needs.issue_analyzer.outputs.sfops_issue_releasedefn }}
+        environment: ${{ matrix.environment }}
+        branchname: releasedefns
+        overrideSkipIfAlreadyInstalled: ${{ needs.issue_analyzer.outputs.sfops_issue_forceInstall}}
+        overridePackageVersions: ${{ needs.issue_analyzer.outputs.sfops_issue_overridePackageVersions }}
+        excludePackages: ${{ needs.issue_analyzer.outputs.sfops_issue_excludePackages }}
+        issue-number: ${{ github.event.issue.number }}
+        releaselogbranch: releaselogs
+        issue-author: ${{github.event.issue.user.login}}
+        issue-notifier: ${{ inputs.issue-notifier }}
+        workitem-url: ${{ inputs.workitem-url }}
+        metrics-provider: 'datadog'
+        sfopsbot-app-id: ${{ inputs.sfopsbot-app-id }}
+    secrets:
+        NPM_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        DEVHUB_SFDX_AUTH_URL: ${{ secrets.DEVHUB_SFDX_AUTH_URL }}
+        ENV_SFDX_AUTH_URL: ${{ secrets[format('{0}_SFDX_AUTH_URL',  matrix.environment )] }}
+        SFOPSBOT_APP_PRIVATE_KEY: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+  
+      
+  release-to-orgs:
+    needs: 
+      - issue_analyzer
+      - pre_release_check
+      - fetch-release-envs
+    uses:  flxbl-azlam/sfops-gh-actions/.github/workflows/release-to-an-env.yml@main
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: ${{  fromJSON(needs.fetch-release-envs.outputs.allEnvsAsJSON) }}
+    with:
+        org-name:  ${{ matrix.environment }}
+        releaseDefn:  ${{ needs.issue_analyzer.outputs.sfops_issue_releasedefn }}
+        environment: ${{ matrix.environment }}
+        environment-profile: ${{ matrix.environment }}
+        branchname: releasedefns
+        additional-plugins: ${{ inputs.additional-plugins }}
+        overrideSkipIfAlreadyInstalled: ${{ needs.issue_analyzer.outputs.sfops_issue_forceInstall}}
+        source-repo-url: ${{ inputs.source-repo-url }}
+        dashboard-repo: ${{ inputs.dashboard-repo }}
+        workitem-url: ${{ inputs.workitem-url }}
+        overridePackageVersions: ${{ needs.issue_analyzer.outputs.sfops_issue_overridePackageVersions }}
+        excludePackages: ${{ needs.issue_analyzer.outputs.sfops_issue_excludePackages }}
+        issue-number: ${{ github.event.issue.number }}
+        issue-author: ${{github.event.issue.user.login}}
+        releaselogbranch: releaselogs
+        issue-notifier: ${{ inputs.issue-notifier }}
+        metrics-provider:  ${{ inputs.metrics-provider }}
+        pathToReleaseConfigs: 'config'
+        releaseBoard: 'ReleaseBoard'
+        sfopsbot-app-id: ${{ inputs.sfopsbot-app-id }}
+    secrets:
+        DEVHUB_SFDX_AUTH_URL: ${{ secrets.DEVHUB_SFDX_AUTH_URL }}
+        SB_SFDX_AUTH_URL: ${{ secrets.SB_SFDX_AUTH_URL }}
+        SFOPSBOT_APP_PRIVATE_KEY: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}  
+        DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+        DATADOG_HOST: ${{ secrets.DATADOG_HOST }}
+        NPM_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  
+  close_issue:
+     runs-on: ubuntu-latest
+     container: ghcr.io/flxbl-azlam/sfops-gh-actions-lite:latest
+     needs:   release-to-orgs
+     steps:
+
+      # gh needs a repo bummer
+      - uses: actions/checkout@v4
+
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+         app-id: ${{ inputs.sfopsbot-app-id }}
+         private-key: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+         owner: ${{ github.repository_owner }}
+
+
+      - name: Close Issue
+        run: |
+          git config --global --add safe.directory $GITHUB_WORKSPACE
+          export GH_TOKEN=${{steps.app-token.outputs.token}}
+          echo "GH_TOKEN=$GH_TOKEN" >> $GITHUB_ENV
+          gh issue close ${{ github.event.issue.number }} -c " Hello @${{ github.event.issue.user.login }} :wave: Your request has been sucessfully processed" -r "Completed"
+        env:
+           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Report env infos
+        uses: flxbl-azlam/sfops-gh-actions/reportEnvInfos@main
+        with:
+          gh_token: ${{ steps.app-token.outputs.token }}
+          dashboard-repo: ${{ inputs.dashboard-repo }}
+
+      - uses: flxbl-azlam/sfops-gh-actions/workflowExecutionTime@main
+        name: Report Workflow Execution Time
+        id: workflow
+        continue-on-error: true
+        with:
+          name: 'release'
+          gh_token: ${{steps.app-token.outputs.token}}
+          metrics-provider: ${{ vars.SFOPS_METRICS_PROVIDER }}
+          DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+          DATADOG_HOST: ${{ secrets.DATADOG_HOST }}
+
+  comment_issue_on_error:
+      runs-on: ubuntu-latest
+      needs:  
+          - issue_analyzer
+          - fetch-release-envs
+          - pre_release_check
+          - release-to-orgs
+      if:   always() &&
+          (
+            needs.issue_analyzer == 'failure' ||
+            needs.fetch-release-envs == 'failure' ||
+            needs.pre_release_check == 'failure' ||
+            needs.release-to-orgs.result == 'failure'
+          )
+      steps:
+
+
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ inputs.sfopsbot-app-id}}
+          private-key: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Create Comment after failure
+        uses: flxbl-azlam/sfops-gh-actions/add-pr-comment@main
+        with:
+          issue: ${{ github.event.issue.number }}
+          repo-token: ${{ steps.app-token.outputs.token }}
+          message: |      
+            ## ⚠️ Something went wrong !!! ⚠️
+
+            Hello @${{ github.event.issue.user.login }} :wave: ,
+
+            Looks like the **sfops 🤖**   has failed to process your request successfully.  Can you have a look please?
+            
+            This would need your manual attention please check the job run
+            at the link https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}
+
+            [1]: This comment is auto generated by [sfops 🤖]

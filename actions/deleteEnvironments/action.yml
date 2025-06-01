@@ -1,0 +1,12 @@
+name: 'Delete Deployments and Environments'
+description: 'GitHub Action to delete deployments and environments for multiple environments'
+inputs:
+  token:
+    description: 'GitHub token'
+    required: true
+  exclude_environments:
+    description: 'Comma-separated list of environments to be excluded'
+    required: true
+runs:
+  using: 'node20'
+  main: 'dist/index.js'

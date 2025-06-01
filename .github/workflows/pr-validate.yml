@@ -1,0 +1,519 @@
+name: "Validate Pull Request"
+on:
+  workflow_call:
+    inputs:
+      sfopsbot-app-id: 
+         description: The App id of the bot used for this workflow_call
+         type: "string"
+      metrics-provider:
+        description: "The metrics provider to be used"
+        type: "string"
+      devhub-username:
+        description: "The username of the devhub to be used to fetch review envs"
+        type: "string"
+      additional-plugins:
+         description: Additional plugins used while deploying packages
+         type: "string"
+      sfp-server-url: 
+         description: The URL to the sfp server instance
+         type: "string"
+    secrets:
+      NPM_TOKEN:
+        description: "GH TOKEN to publish to NPM"
+      DEVHUB_SFDX_AUTH_URL:
+        description: "Devhub Auth URL"
+      SB_SFDX_AUTH_URL:
+        description: "Sandbox Auth URL"
+      DATADOG_API_KEY:
+        description: "Datadog api key to report metrics"
+      DATADOG_HOST:
+        description: "Datadog host to report metrics"
+      SFOPSBOT_APP_PRIVATE_KEY:
+        description: "Private key of the bot app used"
+      SFP_SERVER_TOKEN:
+        description: "SFP Server Token"
+
+
+jobs:
+
+ instructions:
+    name: 'Display instructions on every PR'
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+         app-id: ${{ inputs.sfopsbot-app-id }}
+         private-key: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+         owner: ${{ github.repository_owner }}
+
+  
+      - uses: flxbl-azlam/sfops-gh-actions/add-pr-comment@main
+        with:
+          allow-repeats: false
+          message-id: intro
+          refresh-message-position: false
+          repo-token: ${{ steps.app-token.outputs.token }}
+          message: |
+              Hello @${{ github.event.pull_request.user.login }}, :wave:
+
+              If you are a new contributor to this repository, read on!
+
+              This is a sfops powered Salesforce repository.  Your requested changes will now be deployed to a review scratch org or sandbox depending on the configuration
+
+              You can use the review environment to validate your changes and test your work.
+
+              Please coordinate with your team and ensure that the changes are validated before merging
+
+              You can type in the following as a comment for further actions
+              
+              ♻️  ```sfops renew```  -   Fetch a new review environment, even if its unassigned
+              🕙 ```sfops extend```  -  Extend the review environment upto 48 hours (only for sandboxes)
+
+      - uses: flxbl-azlam/sfops-gh-actions/action-remove-labels@main
+        with:
+          fail_on_error: false
+          github_token: ${{ steps.app-token.outputs.token }}
+          labels: |
+            validation-skipped
+            validation-failed
+            validation-succeeded
+
+      - uses: actions/github-script@v7
+        name: 'Add validation specific labels'
+        with:
+            github-token: ${{ steps.app-token.outputs.token }}
+            script: |
+              github.rest.issues.addLabels({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: [ "validation-pending" ]
+              })
+
+
+
+ static:
+    name: 'Static Analysis of Project using sfp'
+    runs-on: ubuntu-latest
+    container: ghcr.io/flxbl-azlam/sfops-gh-actions-lite:latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+          
+
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+         app-id: ${{ inputs.sfopsbot-app-id }}
+         private-key: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+         owner: ${{ github.repository_owner }}
+
+      - name: 'Run sfp project analyze'
+        run: |
+            sfp project analyze --output-format github
+        env:
+          SFOPSBOT_APP_ID: ${{ inputs.sfopsbot-app-id }}
+          SFOPSBOT_APP_PRIVATE_KEY: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+
+
+      - uses: pmd/pmd-github-action@v2
+        with:
+          rulesets: 'pmd-rulesets/pmd-ruleset.xml'
+          analyzeModifiedFilesOnly: true
+          token: ${{ steps.app-token.outputs.token }}
+          version: 7.7.0
+ 
+ analyze:
+  name: 'Analyze Impacted Domains'
+  runs-on: ubuntu-latest
+  if: github.event.pull_request.draft == false
+  container: ghcr.io/flxbl-azlam/sfops-gh-actions-lite:latest
+  outputs:
+    matrix: ${{ steps.set-matrix.outputs.matrix }}
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+  
+    - uses: actions/create-github-app-token@v1
+      id: app-token
+      name: Fetch App Token
+      with:
+         app-id: ${{ inputs.sfopsbot-app-id }}
+         private-key: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+         owner: ${{ github.repository_owner }}
+
+    - name: 'Retrieve the first commit of a PR'
+      id: first-commit
+      uses: flxbl-azlam/sfops-gh-actions/getFirstCommitOfAPR@main
+      with:
+        github_token: ${{ steps.app-token.outputs.token }}
+
+
+    - name: 'Figure Impacted Release Defns'
+      uses: flxbl-azlam/sfops-gh-actions/impactedReleaseDefnPerChangeDetector@main
+      with:
+       pathToReleaseDefns: 'config'
+       base-branch:   ${{ github.event.pull_request.base.sha }}
+       feature-branch: ${{ steps.first-commit.outputs.first_commit_sha }}  
+
+
+  
+    - uses: flxbl-azlam/sfops-gh-actions/branchDeploymentReporter@main
+      name: Report Branch Status
+      id: report
+      with:
+        status: 'validation'
+        branch: ${{ github.event.pull_request.head.ref }}   
+        dashboard-repo:  ${{ vars.SFOPS_DASHBOARD_REPO }}
+        gh_token: ${{steps.app-token.outputs.token}}
+        issue-number: ${{ github.event.pull_request.number }}
+  
+       
+    - name: Set matrix data
+      id: set-matrix
+      run: |
+         echo "matrix=$(jq -c . < ./impacted-release-configs.json)" >> $GITHUB_OUTPUT
+
+ validate:
+    name: 'Deploy to Review Environment and Validate'
+    runs-on: ubuntu-latest
+    container: ghcr.io/flxbl-azlam/sfops-gh-actions:latest
+    if: ${{ needs.analyze.outputs.matrix != '[]' && needs.analyze.outputs.matrix != '' }}
+    needs: analyze
+    env:
+      SFOPSBOT_APP_PRIVATE_KEY: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY}}
+      SFOPSBOT_APP_ID: ${{ inputs.sfopsbot-app-id }}
+      GITHUB_TOKEN: ${{ secrets.NPM_TOKEN }}
+      SFP_SERVER_TOKEN: ${{ secrets.SFP_SERVER_TOKEN }}
+      SFP_SERVER_URL: ${{ inputs.sfp-server-url }}
+    strategy:
+      fail-fast: true
+      matrix: ${{ fromJson(needs.analyze.outputs.matrix) }}
+      max-parallel: 1
+    outputs:
+      sbxname: ${{ steps.fetchCISandbox.outputs.sbxname }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        name: Fetch sfops App Token
+        with:
+         app-id: ${{ inputs.sfopsbot-app-id }}
+         private-key: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+         owner: ${{ github.repository_owner }}
+         skip-token-revoke: true
+
+      - name: 'Authenticate DevHub'
+        run: |
+            echo "${{ secrets.DEVHUB_SFDX_AUTH_URL }}" > ./authfile
+            sfp org login -f authfile -a devhub
+
+      - name: 'Fetch Type of Pool'
+        id: getTypeOfPool
+        run: |
+          sfp pool probe -n ${{ matrix.pool }}  -f config 
+
+      - name: Export Datadog Environment Variables
+        if: ${{ inputs.metrics-provider == 'datadog'}}
+        run: |
+          echo "SFPOWERSCRIPTS_DATADOG=true" >> $GITHUB_ENV
+          echo "SFPOWERSCRIPTS_DATADOG_HOST=${{ secrets.DATADOG_HOST }}" >> $GITHUB_ENV
+          echo "SFPOWERSCRIPTS_DATADOG_API_KEY=${{ secrets.DATADOG_API_KEY }}" >> $GITHUB_ENV
+
+
+      - uses: actions/github-script@v7
+        name: 'Add Labels'
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: [ "${{ matrix.releaseName }}"]
+            })
+  
+
+      - run: |
+          sfp reviewenv fetch \
+             --repository ${{ github.repository }} \
+             --issue ${{ github.event.number }} \
+             --pool ${{ matrix.pool }} \
+             --pooltype ${{ steps.getTypeOfPool.outputs.type }} \
+             --branch ${{ github.base_ref }} \
+             --leasefor  ${{ vars.SFOPS_MAX_TIME_FOR_LEASE || 60 }} \
+             -w 20
+        shell: bash
+        if: contains(github.base_ref,'release-') == false
+        id: fetchReviewEnv
+        name: Fetch Review Environment
+
+
+
+      - run: |
+          sfp reviewenv fetch \
+             --repository ${{ github.repository }} \
+             --issue ${{ github.event.number }} \
+             --pool HOTFIX \
+             --pooltype ${{ steps.getTypeOfPool.outputs.type }} \
+             --branch release \
+             --leasefor  ${{ vars.SFOPS_MAX_TIME_FOR_LEASE || 60 }} \
+             -w 20
+        shell: bash
+        if:  contains(github.base_ref,'release-') || github.base_ref == 'refs/heads/release/**'
+        id: fetchReviewEnvHotfix
+        name: Fetch Review Environment for Hotfix
+
+
+
+      - name: 'Authenticate review environment'
+        if:  contains(github.base_ref,'release-') == false
+        run: |
+          if [ '${{ steps.getTypeOfPool.outputs.type }}' == 'sandbox' ]; then
+            sfp org login sandbox -n ${{ steps.fetchReviewEnv.outputs.reviewEnvName }} -v devhub -a review
+          else
+           sfp scratch login -u ${{ steps.fetchReviewEnv.outputs.reviewEnvName  }} -v devhub -a review
+          fi
+
+      - name: 'Update Sandbox status '
+        uses:  flxbl-azlam/sfops-gh-actions/sandboxStatusReporter@main
+        continue-on-error: true
+        with:
+            dashboard-repo: ${{ vars.SFOPS_DASHBOARD_REPO }}
+            gh_token:  ${{ steps.app-token.outputs.token }}
+
+      - name: 'Authenticate review sandbox for hotfix'
+        if: contains(github.base_ref,'release-') || github.base_ref == 'refs/heads/release/**'
+        run: |
+           sfp org login sandbox -n ${{ steps.fetchReviewEnvHotfix.outputs.reviewEnvName }}  -v devhub -a review
+
+
+      - name: Install additional plugins if any
+        run: |
+          if [[ -n "${{ inputs.additional-plugins }}" ]]; then
+              IFS=',' read -ra plugins <<< "${{ inputs.additional-plugins }}"
+              for plugin in "${plugins[@]}"; do
+                  echo "Installing $plugin"
+                  echo 'y' | sf plugins install $plugin
+              done
+          fi
+
+
+      - name: 'Retrive the first commit of a PR'
+        id: first-commit
+        uses: flxbl-azlam/sfops-gh-actions/getFirstCommitOfAPR@main
+        with:
+         github_token: ${{ steps.app-token.outputs.token }}
+
+
+      # Validate source and trigger test
+      - name: 'Validate in Review Environment'
+        if: contains(github.base_ref,'release-') == false
+        id: validateWithSandbox
+        timeout-minutes: 80
+        run: |
+          if [ '${{ vars.SFOPS_DISABLE_SOURCEPKG_OVERRIDE }}' = 'true' ]; then
+             sfp validate org -u review -v devhub \
+            --diffcheck  --disablesourcepkgoverride  --installdeps \
+            --mode=thorough --releaseconfig=${{matrix.filePath}} --orginfo \
+            --baseRef ${{ github.event.pull_request.base.sha }} --ref ${{ steps.first-commit.outputs.first_commit_sha }}
+          else
+              sfp validate org  -u review -v devhub \
+              --diffcheck --installdeps  --mode=thorough --releaseconfig=${{matrix.filePath}} --orginfo \
+              --baseRef ${{ github.event.pull_request.base.sha }} --ref  ${{ steps.first-commit.outputs.first_commit_sha }}
+          fi
+          
+      - name: 'Validate in  Review sandbox for hotfix'
+        if:  contains(github.base_ref,'release-')
+        id: validateWithSandboxHotfix
+        timeout-minutes: 120
+        run: |
+          if [ '${{ vars.SFOPS_DISABLE_SOURCEPKG_OVERRIDE }}' = 'true' ]; then
+             sfp validate org -u review -v devhub \
+              --diffcheck  --disableartifactupdate \
+              --disablesourcepkgoverride  --installdeps \
+              --mode=ff-release-config --releaseconfig=${{matrix.filePath}} --orginfo \
+              --baseRef ${{ github.event.pull_request.base.sha }} --ref ${{ steps.first-commit.outputs.first_commit_sha }}
+          else
+              sfp validate org  -u review -v devhub \
+              --diffcheck  --disableartifactupdate --installdeps  \
+              --mode=ff-release-config --releaseconfig=${{matrix.filePath}} --orginfo \
+              --baseRef ${{ github.event.pull_request.base.sha }} --ref ${{ steps.first-commit.outputs.first_commit_sha }}
+          fi
+
+
+
+      #App Token has an expriy of an hour, do a refresh again
+      - uses: actions/create-github-app-token@v1
+        id: app-token-refreshed
+        name: Refresh sfops App Token
+        if: always()
+        with:
+         app-id: ${{ inputs.sfopsbot-app-id }}
+         private-key: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+         owner: ${{ github.repository_owner }}
+
+            
+      # Publish logs
+      - uses: actions/upload-artifact@v4
+        name: Publish Logs
+        if: always()
+        with:
+          name: validate-${{ matrix.releaseName }}-logs
+          path: .sfpowerscripts/logs
+  
+        # Publish testresults
+      - uses: actions/upload-artifact@v4
+        name: Publish Test Results
+        if: always()
+        with:
+          name: ${{ matrix.releaseName }}-testresults
+          path: .testresults
+
+
+      # Transition review environment to available
+      - run: |
+          sfp reviewenv transition \
+             --repository ${{ github.repository }} \
+             --issue ${{ github.event.number }} \
+             --status "Available"
+        shell: bash
+        id: updateReviewEnvStatus
+        continue-on-error: true
+        if: always()
+        name: Update status of Review Environment to available
+
+ results:
+    if: ${{ always()  &&  github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    container: ghcr.io/flxbl-azlam/sfops-gh-actions-lite:latest
+    name:  Status Check - Validate Domain
+    needs: [analyze,validate]
+    steps:
+    
+     - uses: actions/checkout@v4
+  
+     - uses: actions/create-github-app-token@v1
+       id: app-token
+       name: Fetch App Token
+       with:
+         app-id: ${{ inputs.sfopsbot-app-id }}
+         private-key: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+         owner: ${{ github.repository_owner }}
+
+
+
+     - uses: flxbl-azlam/sfops-gh-actions/workflowExecutionTime@main
+       name: Report Workflow Execution Time
+       id: workflow
+       continue-on-error: true
+       with:
+        name: 'validation'
+        gh_token: ${{steps.app-token.outputs.token}}
+        metrics-provider: ${{ vars.SFOPS_METRICS_PROVIDER }}
+        DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+        DATADOG_HOST: ${{ secrets.DATADOG_HOST }}
+
+
+
+     - uses: flxbl-azlam/sfops-gh-actions/add-pr-comment@main
+       if: ${{ needs.analyze.outputs.matrix == '[]' || needs.analyze.outputs.matrix == '' }}
+       name: 'Report No Domain Found'
+       with:
+          allow-repeats: false
+          message-id: no-domain-found
+          refresh-message-position: false
+          repo-token: ${{ steps.app-token.outputs.token }}
+          message: |
+              Hello @${{ github.event.pull_request.user.login }}, :wave:
+
+              I was not able to find a release config that matches your change and hence your change is not deployed to a review environment
+              If your changes contain metadata, You might want to relocate the metadata to a different location or if its a new package update the release configs
+
+              If your changes do not contain metadata, please feel free to merge the changes
+
+
+     - uses: flxbl-azlam/sfops-gh-actions/branchDeploymentReporter@main
+       name: Report Branch Status
+       id: report
+       if: ${{  contains(needs.*.result, 'skipped')  ||  contains(needs.*.result, 'success') }}
+       with:
+        status: 'validated'
+        branch: ${{ github.event.pull_request.head.ref }}   
+        dashboard-repo:  ${{ vars.SFOPS_DASHBOARD_REPO }}
+        gh_token: ${{steps.app-token.outputs.token}}
+        issue-number: ${{ github.event.pull_request.number }}
+
+     - uses: flxbl-azlam/sfops-gh-actions/action-remove-labels@main
+       with:
+          fail_on_error: false
+          github_token: ${{ steps.app-token.outputs.token }}
+          labels: |
+            validation-pending
+            validation-failed
+            validation-succeeded
+
+     - uses: actions/github-script@v7
+       name: 'Add success Labels'
+       if: ${{  contains(needs.validate.result, 'success') }}
+       with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: [ "validation-succeeded" ]
+            })
+
+     - uses: actions/github-script@v7
+       name: 'Add Failed Labels'
+       if: ${{  contains(needs.validate.result, 'failure') || contains(needs.validate.result, 'cancelled') }}
+       with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: [ "validation-failed" ]
+            })
+
+     - uses: actions/github-script@v7
+       if: ${{  contains(needs.validate.result, 'skipped') }}
+       name: 'Add skipped Labels'
+       with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: [ "validation-skipped" ]
+            })
+  
+     - name: 'Update Sandbox status '
+       uses:  flxbl-azlam/sfops-gh-actions/sandboxStatusReporter@main
+       continue-on-error: true
+       with:
+            dashboard-repo: ${{ vars.SFOPS_DASHBOARD_REPO }}
+            gh_token:  ${{ steps.app-token.outputs.token }}
+
+     - run: exit 1
+       name: 'Exit with error'
+       if: ${{  contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+
+     - run: exit 0
+       name: 'Exit with success'
+       if: ${{  contains(needs.*.result, 'skipped') }}

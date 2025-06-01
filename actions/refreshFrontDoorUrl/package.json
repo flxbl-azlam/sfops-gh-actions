@@ -1,0 +1,19 @@
+{
+  "name": "refresh-frontdoor-url",
+  "version": "1.0.0",
+  "description": "",
+  "main": "refreshFrontDoorUrl.js",
+  "scripts": {
+   "build": "ncc build refreshFrontDoorUrl.js"
+
+  },
+  "author": "",
+  "license": "BSL",
+  "devDependencies": {
+    "@vercel/ncc": "^0.38.1"
+  },
+  "dependencies": {
+    "@octokit/rest": "^20.0.2",
+    "dedent-js": "^1.0.1"
+  }
+}

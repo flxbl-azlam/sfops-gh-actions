@@ -1,0 +1,105 @@
+name: Extend-Review-Org
+
+
+on:
+  workflow_call:
+    inputs:
+      issue-title: 
+        description: "The title of the issue"
+        type: "string"
+      issue-body: 
+         description: "The body of the issue"
+         type: "string"
+      issue-number:
+         description: "The number of the issue"
+         type: "string"
+      dashboard-repo:
+        description: "Target repo to submit package version report as HTML"
+        type: "string"
+      metrics-provider:
+        description: "The metrics provider to be used"
+        type: "string"
+      sfopsbot-app-id: 
+         description: The App id of the bot used for this workflow_call
+         type: "string"
+    secrets:
+      NPM_TOKEN:
+        description: "GH TOKEN to publish to NPM"
+      DEVHUB_SFDX_AUTH_URL:
+        description: "Devhub Auth URL"
+      SB_SFDX_AUTH_URL:
+        description: "Sandbox Auth URL"
+      DATADOG_API_KEY:
+        description: "Datadog api key to report metrics"
+      DATADOG_HOST:
+        description: "Datadog host to report metrics"
+      SFOPSBOT_APP_PRIVATE_KEY:
+        description: "Private key of the bot app used"  
+  
+  
+jobs:
+  renew-sandbox:
+    runs-on: ubuntu-latest
+    container: ghcr.io/flxbl-azlam/sfops-gh-actions-lite:latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        name: "Get installation token for sfopsbot"
+        with:
+         app-id: ${{ inputs.sfopsbot-app-id }}
+         private-key: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY }}
+         owner: ${{ github.repository_owner }}
+
+
+      - uses: flxbl-azlam/sfops-gh-actions/pull-request-comment-branch@main
+        name: Figure out the commit refs
+        id: comment-branch
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.comment-branch.outputs.head_ref}}
+          fetch-depth: 0
+
+
+      - name: Extend Review Environment
+        run: |
+              sfp reviewenv extend \
+              --repository "${{ github.repository }}" \
+              --issue ${{ github.event.issue.number }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.NPM_TOKEN }}
+          SFOPSBOT_APP_PRIVATE_KEY: ${{ secrets.SFOPSBOT_APP_PRIVATE_KEY}}
+          SFOPSBOT_APP_ID: ${{ inputs.sfopsbot-app-id }}
+
+
+      - name: Create Message Body as File
+        id: message_template_success
+        if: success()
+        run: |
+          printf "\nHello @${{ github.event.issue.user.login }} :wave:\n" >> message.md
+          printf "\n Your request to extend the review sandbox for the ${{ github.event.issue.number}} is succesfull" >> message.md
+
+      - name: Create Message Body as File
+        id: message_template_error
+        if: failure()
+        run: |
+          printf "\nHello @${{ github.event.issue.user.login }} :wave:\n" >> message.md
+          printf "\n Your request to extend the review sandbox for the ${{ github.event.issue.number}} is unsucessfull" >> message.md
+          printf "\n The associated org could not be found or the org has been already extended, please proceed to close and reopen the PR" >> message.md
+          
+
+                       
+  
+      - uses: flxbl-azlam/sfops-gh-actions/add-pr-comment@main
+        name: Print Commment
+        if: success() || failure()
+        with:
+          allow-repeats: false
+          repo-token: ${{ steps.app-token.outputs.token }}
+          message-id: renew-${{ inputs.issue-number }}
+          refresh-message-position: true
+          message-path: |
+             message.md        
+

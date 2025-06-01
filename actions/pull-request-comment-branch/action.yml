@@ -1,0 +1,19 @@
+name: "Pull Request Comment Branch"
+description: "Gets the head ref and sha of a pull request comment"
+inputs:
+  repo_token:
+    description: "GITHUB_TOKEN token or a repo scoped PAT"
+    required: true
+    default: ${{ github.token }}
+outputs:
+  base_ref:
+    description: "The name of the branch the pull request will merge into."
+  base_sha:
+    description: "The head sha of the branch the pull request will merge into."
+  head_ref:
+    description: "The name of the pull request branch the comment belongs to."
+  head_sha:
+    description: "The head sha of the pull request branch the comment belongs to."
+runs:
+  using: "node20"
+  main: "dist/index.js"
